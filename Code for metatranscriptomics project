@@ -1,0 +1,582 @@
+Data Preprocessing Step for Quality Control
+
+FastQC v0.11.9 
+
+#!/bin/bash
+
+#create a directory where the FastQC output will move into
+mkdir test_fastqc
+
+#perform FastQC
+for sample in $(cat study.txt) ; do
+    fastqc "$PWD/${sample}.fastq.gz" -o test_fastqc
+done
+
+#immediately perform MultiQC
+multiqc test_fastqc -o test_fastqc
+
+CutAdapt v4.1
+
+#!/bin/bash
+
+#create a directory for the trimmed reads
+mkdir trimmed_reads
+
+#perfom cutadapt and output the summary of each sequence using their SRR IDs
+for sample in $(cat study.txt) ; do
+    cutadapt --no-indel -b AGATCGGAAGAG -m 22 -o "trimmed_reads/${sample}.fastq.gz" "$PWD/${sample}.fastq.gz" > "summary_statistics_${sample}.txt"
+done 
+
+SortMeRNA version 4.0.0
+Build Date: Dec  2 2019
+sortmerna_build_git_sha:@bdd71e0010b7e6be7bba4c4941fb077420f87033@
+sortmerna_build_git_date:@2019/12/02 15:18:34@
+ 
+
+#!/bin/bash
+
+for sample in $(cat study.txt) ; do
+    /home/admin/sortme/bin/sortmerna -ref /home/admin/database/smr_v4.3_default_db.fasta -reads "$PWD/${sample}.fastq.gz" -num_alignments 1 -fastx -other -workdir "$PWD" -threads 1:1:40
+
+#sortmerna output has the same format so move each before the loop starts again.
+
+mv /home/admin/SRP135669/trimmed_reads/out "/home/admin/SRP135669/trimmed_reads/${sample}"
+
+#the kvdb directory has to be purged before any new run.
+
+rm -rf /home/admin/SRP135669/trimmed_reads/kvdb
+
+done
+
+Bowtie2 version 2.4.5
+
+#!/bin/bash
+
+for sample in $(cat study.txt); do
+    bowtie2 -x /home/admin/bowtie_index/GRCh38_noalt_as/GRCh38_noalt_as -U "$PWD/${sample}.fastq.gz" -S "${sample}.sam" --met-file "${sample}.met" > "${sample}.stats"
+
+#move each sam output into the created  output directory.
+
+mv "${sample}.sam" /home/admin/sorted_reads/bowtie_result
+
+done
+
+SAMtools Version: 0.1.19-44428cd
+
+#!/bin/bash
+
+for sample in $(cat study.txt) ; do
+
+    samtools view -b -h "${sample}.sam" > "${sample}.bam"
+
+    samtools view -b -f 4 "${sample}.bam" > "${sample}_unmapped.sam"
+
+    samtools view -b -h "${sample}_unmapped.sam" > "${sample}_unmapped.bam"
+
+done
+
+SAMtools Version: 1.14 (To convert unmapped bam files to fastq format)
+
+#!/bin/bash
+
+for sample in $(cat study1.txt) ; do
+
+    samtools fastq "${sample}_unmapped.bam" > "${sample}_unmapped.fastq"
+
+done
+
+
+
+Community Composition Analysis (Metaphlan4)
+
+#!/bin/bash
+
+#create a directory to store the txt output files
+mkdir metaphlan_output
+
+#write a for loop to loop over all the samples in the input folder to provide the community profile
+for sample in $(cat test.txt) ; do
+    metaphlan "${sample}.fastq.gz" --input_type fastq --bowtie2db /home/admin/metaphlan_databases --read_min_len 22 -o "profiled_${sample}.txt"
+
+#move the txt file to the output folder
+mv "profiled_${sample}.txt" /home/admin/metaphlan_input/metaphlan_output
+
+done
+
+#merge the abundance txt files for each sample when all is done
+merge_metaphlan_tables.py *.txt > merged_abundance_table.txt
+
+#get the genus classification table from the merged table
+grep -E "(g__)|(^ID)" merged_abundance_table.txt | grep -v "t__" | sed 's/^.*g__//g' > merged_abundance_table_genus.txt
+
+#get the species table
+grep -E "(s__)|(^ID)" merged_abundance_table.txt | grep -v "t__" | sed 's/^.*s__//g' > merged_abundance_table_species.txt
+
+#merge the abundance species files for each sample when all is done
+merge_metaphlan_tables.py *_species.txt > merged_species_abundance_table.txt
+
+
+
+
+#Statistical analysis using R Studio
+#read in necessary libraries
+library(readxl)
+library(ggplot2)
+library(tidyverse)
+library(RColorBrewer)
+library(dplyr)
+library(phyloseq)
+library(vegan)
+library(ComplexHeatmap)
+library(reshape2)
+library(corrplot)
+library(iheatmapr)
+library(scales)
+library(viridis)
+library(dendextend)
+library(circlize)
+library("ape")
+require("fantaxtic")
+require("phyloseq")
+require("tidyverse")
+library(dplyr)
+library(ggnested)
+library(knitr)
+
+#Load qc datasets to check reads sizes along preprocessing steps
+project_new_qc <- read_excel("project_new_qc.xlsx") #datasheet
+project_new_part <- read_excel("project_new_part.xlsx") #sample part metadata
+project_number <- read_excel("project_number.xlsx") #sample study type metadata
+
+#Restructure the data frame 
+project_new_qc_df <- project_new_qc %>%
+  pivot_longer(-Samples, names_to = "Process", values_to = "Reads")
+#Add the samples part
+project_new_qc_df <- project_new_qc_df %>%
+  left_join(project_new_part, by = "Samples")
+#Add the study numbers
+project_new_qc_df <- project_new_qc_df %>%
+  left_join(project_number, by = "Samples")
+
+#remove all rows where number of reads is 0
+qc_nozero <- project_new_qc_df %>%
+  filter(Reads != 0)
+
+#make jitter plot colored by infection site
+ggplot(qc_nozero, aes(x = Process, y = Reads, color = Part)) + 
+  geom_jitter(aes(colour = Part), 
+              show.legend = TRUE, 
+              position=position_jitter(width =0.15), 
+              alpha = 0.8 ) +
+  stat_summary(fun = median, geom="crossbar", color="black") +
+  scale_y_log10(breaks = c(1, 1e6, 1e7,1e8),
+                limits = c(100000,250000000), 
+                labels = comma) +
+  scale_x_discrete(limits = c("Total", "CutAdapt", "SortmeRNA",  "Bowtie",  "Retrimmed")) +
+  scale_color_manual(name = "Environment",
+                     breaks = c("Sputum", "Wound"),
+                     labels = c("Sputum", "Wound"),
+                     values = c("blue4", "coral4")) +
+  theme(text = element_text(size = 20, colour = 'black'),
+        axis.text = element_text(size = 20, colour = 'black'),
+        panel.background = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        axis.line = element_line(),
+        legend.key = element_blank()) +
+  labs(color = "Environment") +
+  ggtitle("Scatter plot of samples preprocessing")
+
+#jitter plot colored by study
+ggplot(qc_nozero, aes(x = Process, y = Reads, color = Study)) + 
+  geom_jitter(aes(colour = Study), 
+              show.legend = TRUE, 
+              position=position_jitter(width =0.15), 
+              alpha = 0.8 ) +
+  stat_summary(fun = median, geom="crossbar", color="black") +
+  scale_y_log10(breaks = c(1, 1e6, 1e7,1e8),
+                limits = c(100000,250000000), 
+                labels = comma) +
+  scale_x_discrete(limits = c("Total", "CutAdapt", "SortmeRNA",  "Bowtie",  "Retrimmed")) +
+  scale_color_brewer(palette = "Dark2",
+                     breaks = c("One", "Two", "Three", "Four","Five", "Six"),
+                     labels = c("One", "Two", "Three", "Four","Five", "Six")) +
+  theme(text = element_text(size = 20, colour = 'black'),
+        axis.text = element_text(size = 40, colour = 'black'),
+        panel.background = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        axis.line = element_line(),
+        legend.key = element_blank())  +
+  labs(color = "Study") +
+  ggtitle("Scatter plot of samples preprocessing")
+  
+
+
+
+# make scaled colors of stacked barplot
+#get otu table containing an abundance of genera in samples and a tax table containing the taxa
+otu_tab <- read_excel("otu_table.xlsx")
+tax_tab_new <- read_excel("tax_table_new.xlsx")
+
+otu_tab <- otu_tab %>%
+  column_to_rownames("OTU")
+tax_tab_new <- tax_tab_new %>%
+  column_to_rownames("OTU")
+otu_tab <- as.matrix(otu_tab)
+tax_tab_new <- as.matrix(tax_tab_new)
+
+library(phyloseq)
+OTU <- otu_table(otu_tab, taxa_are_rows = TRUE)
+TAX <- tax_table(tax_tab_new)
+OTU
+TAX
+
+#make into a phyloseq object
+physeq <- phyloseq(OTU, TAX)
+physeq
+plot_bar(physeq, fill = "Genus")
+
+#get the sample metadata
+sampleDF <- project_partt %>%
+  column_to_rownames("Samples")
+
+#check that  the row names in the two datasets are the same
+all(rownames(sampleDF) %in% sample_names(physeq))
+
+#make it into a sample_data class
+sampledata = sample_data(sampleDF)
+
+#create a phylogenic tree
+library("ape")
+random_tree = rtree(ntaxa(physeq), rooted=TRUE, tip.label=taxa_names(physeq))
+plot(random_tree)
+
+#make the physeq object
+physeq1 = merge_phyloseq(physeq, sampledata, random_tree)
+physeq1
+
+#now make plot
+require("fantaxtic")
+require("phyloseq")
+require("tidyverse")
+library(dplyr)
+
+# Order samples by the total abundance of firmicutes_bacilli
+sample_order <- psmelt(physeq1) %>%
+  data.frame() %>%
+  # Calculate relative abundances
+  group_by(Sample) %>%
+  mutate(Abundance = Abundance / sum(Abundance)) %>%
+  # Sort by taxon of interest
+  filter(Phylum == "Firmicutes_Bacilli") %>%
+  group_by(Sample) %>%
+  summarise(Abundance = sum(Abundance)) %>%
+  arrange(Abundance) %>% 
+  # Extract the sample order
+  pull(Sample) %>%
+  as.character()
+
+# Plot and beautify
+plot_nested_bar(physeq1,
+                top_level = "Phylum",
+                nested_level = "Genus",
+                sample_order = sample_order,
+                base_clr = "violetred4",
+                legend_title = element_blank()) +
+  facet_wrap(~Part,
+             scales = "free_x") +
+  theme(plot.title = element_text(hjust = 0.5, 
+                                  size = 12, 
+                                  face = "bold"),
+        legend.key.size = unit(15, 
+                               "points"),
+        legend.position = "bottom",
+        legend.box.background = element_rect(color="black", size=2),
+        strip.text = element_text(size=25, color = 'black'),
+        strip.background = element_blank()) +
+  guides(fill = guide_legend(nrow =5))
+
+#subset sputum and see the actual bacterial distribution
+physeq3 = subset_samples(physeq1, Part =="Sputum")
+plot_nested_bar(physeq3,
+                top_level = "Phylum",
+                nested_level = "Genus")
+#do a series of plotting to see rank
+top_nested <- nested_top_taxa(physeq3,
+                              top_tax_level = "Phylum",
+                              nested_tax_level = "Genus",
+                              n_top_taxa = 10, 
+                              n_nested_taxa = 10)
+plot_nested_bar(ps_obj = top_nested$ps_obj,
+                top_level = "Phylum",
+                nested_level = "Genus")
+
+#subset the wound and see the actual bacterial distribution
+physeq4 = subset_samples(physeq1, Part =="Wound")
+plot_nested_bar(physeq4,
+                top_level = "Phylum",
+                nested_level = "Genus")
+#do a series of plotting to see rank
+top_nested <- nested_top_taxa(physeq4,
+                              top_tax_level = "Phylum",
+                              nested_tax_level = "Genus",
+                              n_top_taxa = 10, 
+                              n_nested_taxa = 10)
+plot_nested_bar(ps_obj = top_nested$ps_obj,
+                top_level = "Phylum",
+                nested_level = "Genus")
+
+#Get the top taxa table from both environments
+top_phylum <- top_taxa(physeq1,
+                        n_taxa = 10, 
+                        tax_level = "Phylum")
+top_phylum$top_taxa %>%
+  mutate(abundance = round(abundance, 3)) %>%
+  kable(format = "markdown")
+
+top_genus <- top_taxa(physeq1,
+                        n_taxa = 10, 
+                        tax_level = "Genus")
+top_genus$top_taxa %>%
+  mutate(abundance = round(abundance, 3)) %>%
+  kable(format = "markdown")
+
+#Get top taxa table both sputum
+top_phylum <- top_taxa(physeq3,
+                       n_taxa = 10, 
+                       tax_level = "Phylum")
+top_phylum$top_taxa %>%
+  mutate(abundance = round(abundance, 3)) %>%
+  kable(format = "markdown")
+
+#Get top taxa table from both wound
+top_phylum <- top_taxa(physeq4,
+                       n_taxa = 10, 
+                       tax_level = "Phylum")
+top_phylum$top_taxa %>%
+  mutate(abundance = round(abundance, 3)) %>%
+  kable(format = "markdown")
+
+#Use one big picture to group for phylum and genus
+top_grouped <- top_taxa(physeq1,
+                        n_taxa = 10,
+                        tax_level = "Phylum",
+                        grouping = "Part")
+top_grouped$top_taxa %>%
+  mutate(abundance = round(abundance, 3)) %>%
+  kable(format = "markdown")
+
+top_grouped <- top_taxa(physeq1,
+                        n_taxa = 10,
+                        tax_level = "Genus",
+                        grouping = "Part")
+top_grouped$top_taxa %>%
+  mutate(abundance = round(abundance, 3)) %>%
+  kable(format = "markdown")
+
+#get the mean of the abundance of each taxa from sputum
+top_mean <- top_taxa(physeq3,
+                    n_taxa = 10,
+                    tax_level = "Phylum",
+                    FUN = mean)
+top_mean$top_taxa %>%
+  mutate(abundance = round(abundance, 3)) %>%
+  kable(format = "markdown")
+
+top_mean <- top_taxa(physeq3,
+                     n_taxa = 10,
+                     tax_level = "Genus",
+                     FUN = mean)
+top_mean$top_taxa %>%
+  mutate(abundance = round(abundance, 3)) %>%
+  kable(format = "markdown")
+
+#get the mean of the abundance of each taxa from wound
+top_mean <- top_taxa(physeq4,
+                     n_taxa = 10,
+                     tax_level = "Phylum",
+                     FUN = mean)
+top_mean$top_taxa %>%
+  mutate(abundance = round(abundance, 3)) %>%
+  kable(format = "markdown")
+
+top_mean <- top_taxa(physeq4,
+                     n_taxa = 10,
+                     tax_level = "Genus",
+                     FUN = mean)
+top_mean$top_taxa %>%
+  mutate(abundance = round(abundance, 3)) %>%
+  kable(format = "markdown")
+
+
+#make the anaerobes summary chart
+bar <- read_excel("anaerobes chart.xlsx")
+bar <- data.frame(bar)
+
+library(reshape2)
+melted <- melt(bar,"Group")
+
+barplot <- ggplot(melted, aes(x = value, y = Group, fill = variable))+
+  geom_bar(stat = 'identity', position = 'stack') +
+  scale_fill_manual(values = c("#67000d", "#08519c")) +
+  theme(axis.text = element_text(size = 40, colour = "black"),
+        axis.title = element_text(size = 30, colour = "black"),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(),
+        axis.line = element_line(colour = "black")) +
+  #guides(fill = guide_legend(title = "Sample")) +
+  labs(y = "Group", x = "Count") +
+  scale_x_continuous(expand = c(0,0)) +
+  scale_y_discrete(limits = c("Gram Positive Anaerobe",
+                              "Gram Positive Facultative Anaerobe",
+                              "Gram Negative Anaerobe",
+                              "Gram Negative Facultative Anaerobe",
+                              "Gram Negative Aerobe",
+                              "Gram Positive Aerobe"))
+ Barplot
+
+Functional Analysis (HUMANn3)
+
+
+for sample in $(cat study.txt) ;
+ do
+    humann --input "${sample}.fastq.gz" \
+--output /home/admin/PRJNA720438/humann_input/humann_output \
+--input-format fastq.gz \
+--taxonomic-profile "/home/admin/PRJNA720438/humann_input/metaphlan_tables/${sample}.txt"
+--bypass-prescreen \
+--bypass-nucleotide-index \
+--nucleotide-database /home/admin/metaphlan_databases \
+--protein-database /home/admin/humann_dbs/uniref/uniref50_annotated_v201901b_full.tar.gz/uniref \
+--threads 30 \
+--remove-temp-output
+
+done
+
+#Normalize the output data
+
+for $SAMPLE_genefamilies.tsv in $OUTPUT_DIR
+ do humann_renorm_table --input $SAMPLE_genefamilies.tsv --output $SAMPLE_genefamilies_relab.tsv --units relab
+
+#Regroup the gene families to level4 enzyme classes
+
+humann_regroup_table --input $SAMPLE_genefamilies_relab.tsv --groups level4ec --output $SAMPLE_genefamilies_relab_ec.tsv
+
+#Rename the EC classes
+
+humann_rename_table --input $SAMPLE_genefamilies_relab_ec.tsv --names level4ec --output $SAMPLE_genefamilies_relab_namedec.tsv
+
+#Join all the tables
+
+humann_join_tables --input $INPUT_DIR --output humann_jointtable.tsv
+
+#Split the table for stratification
+
+humann_split_stratified_table --input humann_jointtable.tsv --output $OUTPUT_DIR
+
+
+MaasLin 2 for Differential Expression Analysis
+
+#Load MaAsLin2 package into the R environment
+library(Maaslin2)
+?Maaslin2
+
+
+#DEF
+input_func <- read_excel("humann_ec_unstratified.xlsx")
+func_df <- as.data.frame(input_func)
+func_df <- column_to_rownames(func_df, var="Feature")
+#colSums(func_df) == 0 #check where the sum of the column is zero
+func_df <- t(func_df)
+func_df <- as.data.frame(func_df)
+
+metadata <- read_excel("humann_part.xlsx")
+metadata <- as.data.frame(metadata)
+metadata <- column_to_rownames(metadata, var="Samples")
+metadata$Part <- factor(metadata$Part, levels = c("Sputum","Wound"))
+
+#input data has been normalized to relative abundance
+fit_data <- Maaslin2(func_df, metadata, normalization = 'NONE',
+                     transform = 'LOG', fixed_effects = c("Part"),
+                     output = "humann_genefoldchange", 
+                     min_prevalence = 0.000000000000000000000000000000000000000000000)
+
+sig_func <- filter(fit_data$results, qval < 0.05) # which function meets the p-value threshold
+sig_func$log2fc <- log2(exp(sig_func$coef)) #find the log2fc value from the coefficient
+up_func <- filter(sig_func, qval < 0.05, log2fc > 1) #see where there's up regulation in wound
+down_func <- filter(sig_func, qval < 0.05, log2fc < -1)#see where there's p regulation in sputum 
+
+
+
+func_results <- fit_data$results
+func_results$log2FC <- log2(exp(func_results$coef))
+arrange(func_results,qval) %>%
+  write.csv("humann_all_DEF.csv")
+
+
+#pathway
+input_pathway <- read_excel("humann_pathways_unstratified.xlsx")
+pathway_df <- as.data.frame(input_pathway)
+pathway_df <- column_to_rownames(pathway_df, var="Pathway")
+colSums(pathway_df) == 0 #check where the sum of the column is zero
+
+
+pathway_df <- t(pathway_df)
+pathway_df <- as.data.frame(pathway_df)
+
+metadata <- read_excel("humann_part.xlsx")
+metadata <- as.data.frame(metadata)
+metadata <- column_to_rownames(metadata, var="Samples")
+metadata$Part <- factor(metadata$Part, levels = c("Sputum","Wound"))
+
+
+fit_data3 <- Maaslin2(pathway_df, metadata, normalization = 'NONE',
+                      transform = 'LOG', fixed_effects = c("Part"),
+                      output = "humann_pathway", min_prevalence = 0.0)
+
+sig_pathway <- filter(fit_data3$results, qval < 0.05) 
+sig_pathway$log2fc <- log2(exp(sig_pathway$coef))
+
+path_results <- fit_data3$results
+path_results$log2FC <- log2(exp(path_results$coef))
+arrange(path_results,qval) %>%
+  write.csv("humann_all_DEP.csv")
+
+
+Functional Analysis (SAMSA2)
+
+#!/bin/bash
+
+for sample in $(cat test.txt) ; do
+
+#Using RefSeq database and DIAMOND aligner
+
+/home/admin/samsa2/programs/diamond blastx --db /home/admin/samsa2/full_databases/RefSeq_bac -q "${sample}.fastq.gz" -a "${sample}.fastq.gz.RefSeq" -t ./ -k 1
+
+/home/admin/samsa2/programs/diamond view --daa "${sample}.fastq.gz.RefSeq.daa" -o "${sample}_refoutput" -f tab
+
+
+#Organism analysis with RefSeq
+
+ python /home/admin/samsa2/python_scripts/DIAMOND_analysis_counter.py -I "${sample}_refoutput" -D /home/admin/samsa2/full_databases/RefSeq_bac.fa -O
+
+#Functional analysis with RefSeq
+python /home/admin/samsa2/python_scripts/DIAMOND_analysis_counter.py -I "${sample}_refoutput" -D /home/admin/samsa2/full_databases/RefSeq_bac.fa -F
+
+
+#Using SEED subsystems database and DIAMOND aligner
+ /home/admin/samsa2/programs/diamond blastx --db /home/admin/samsa2/full_databases/subsys_db -q "${sample}.fastq.gz" -a "${sample}_retrimmed.fastq.gz.Subsys" -t ./ -k 1
+
+ /home/admin/samsa2/programs/diamond view --daa "${sample}.fastq.gz.Subsys.daa" -o "${sample}_suboutput" -f tab
+
+#hierarchical analysis with SEED subsystems
+
+python /home/admin/samsa2/python_scripts/DIAMOND_subsystems_analysis_counter.py -I "${sample}_suboutput" -D /home/admin/samsa2/full_databases/subsys_db.fa -O "${sample}_suboutput.hierarchy" -P "${sample}_suboutput.receipt"
+
+#reducing hierarchical analysis result
+
+ python /home/admin/samsa2/python_scripts/subsys_reducer.py -I "${sample}_suboutput.hierarchy"
+
+done
